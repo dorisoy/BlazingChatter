@@ -4,6 +4,7 @@ using BlazingChatter.Extensions;
 using BlazingChatter.Shared;
 using Microsoft.AspNetCore.Components;
 using Microsoft.AspNetCore.Components.Web;
+using Microsoft.AspNetCore.Components.WebAssembly.Authentication;
 using Microsoft.AspNetCore.SignalR.Client;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
@@ -18,10 +19,11 @@ using System.Timers;
 
 namespace BlazingChatter.Client.Pages
 {
-    public partial class ChatRoom
+    public partial class ChatRoom : IAsyncDisposable
     {
         readonly Dictionary<string, ActorMessage> _messages = new(StringComparer.OrdinalIgnoreCase);
         readonly HashSet<Actor> _usersTyping = new();
+        readonly HashSet<IDisposable> _hubRegistrations = new();
         readonly List<double> _voiceSpeeds =
             Enumerable.Range(0, 12).Select(i => (i + 1) * .25).ToList();
         readonly Timer _debouceTimer = new()
@@ -31,16 +33,19 @@ namespace BlazingChatter.Client.Pages
         };
 
         HubConnection _hubConnection;
+
         string _messageId;
         string _message;
         bool _isTyping;
+
+        ActorCommand _lastCommand;
 
         ElementReference _messageInput;
         List<SpeechSynthesisVoice> _voices;
         string _voice = "Auto";
         double _voiceSpeed = 1;
 
-        public ChatRoom() => 
+        public ChatRoom() =>
             _debouceTimer.Elapsed +=
                 async (sender, args) => await SetIsTyping(false);
 
@@ -59,27 +64,41 @@ namespace BlazingChatter.Client.Pages
         [Inject]
         public ILogger<ChatRoom> Log { get; set; }
 
+        [Inject]
+        public IAccessTokenProvider TokenProvider { get; set; }
+
         protected override async Task OnInitializedAsync()
         {
             _hubConnection = new HubConnectionBuilder()
-                .WithUrl(Nav.ToAbsoluteUri("/chat"))
+                .WithUrl(Nav.ToAbsoluteUri("/chat"),
+                    options => options.AccessTokenProvider =
+                        async () => await GetAccessTokenValueAsync())
                 .WithAutomaticReconnect()
                 .AddMessagePackProtocol()
                 .Build();
 
-            _hubConnection.OnMessageReceived(OnMessageReceivedAsync);
-            _hubConnection.OnUserTyping(OnUserTypingAsync);
-
-            _hubConnection.OnUserLoggedOn(
-                actor => JavaScript.NotifyAsync("Hey!", $"{actor.User} logged on..."));
-            _hubConnection.OnUserLoggedOff(
-                actor => JavaScript.NotifyAsync("Bye!", $"{actor.User} logged off..."));
+            _hubRegistrations.Add(_hubConnection.OnMessageReceived(OnMessageReceivedAsync));
+            _hubRegistrations.Add(_hubConnection.OnUserTyping(OnUserTypingAsync));
+            _hubRegistrations.Add(
+                _hubConnection.OnCommandSignalReceived(OnCommandSignalReceived));
+            _hubRegistrations.Add(_hubConnection.OnUserLoggedOn(
+                actor => JavaScript.NotifyAsync("Hey!", $"{actor.User} logged on...")));
+            _hubRegistrations.Add(_hubConnection.OnUserLoggedOff(
+                actor => JavaScript.NotifyAsync("Bye!", $"{actor.User} logged off...")));
 
             await _hubConnection.StartAsync();
             await _messageInput.FocusAsync();
 
             await UpdateClientVoices(
                 await JavaScript.GetClientVoices(this));
+        }
+
+        void OnCommandSignalReceived(ActorCommand command) => _lastCommand = command;
+
+        async ValueTask<string> GetAccessTokenValueAsync()
+        {
+            var result = await TokenProvider.RequestAccessToken();
+            return result.TryGetToken(out var accessToken) ? accessToken.Value : null;
         }
 
         async Task OnMessageReceivedAsync(ActorMessage message) =>
@@ -127,6 +146,11 @@ namespace BlazingChatter.Client.Pages
             if (args is { Key: "Enter" } and { Code: "Enter" })
             {
                 await SendMessage();
+            }
+
+            if (args is { Key: "ArrowUp" } && _lastCommand is not null)
+            {
+                _message = _lastCommand.OriginalText;
             }
         }
 
@@ -204,5 +228,27 @@ namespace BlazingChatter.Client.Pages
                     StateHasChanged();
                 }
             });
+
+        public async ValueTask DisposeAsync()
+        {
+            if (_debouceTimer is { })
+            {
+                _debouceTimer.Stop();
+                _debouceTimer.Dispose();
+            }
+
+            if (_hubRegistrations is { Count: > 0 })
+            {
+                foreach (var disposable in _hubRegistrations)
+                {
+                    disposable.Dispose();
+                }
+            }
+
+            if (_hubConnection is not null)
+            {
+                await _hubConnection.DisposeAsync();
+            }
+        }
     }
 }

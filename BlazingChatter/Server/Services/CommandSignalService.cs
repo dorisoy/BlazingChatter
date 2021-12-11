@@ -1,9 +1,9 @@
 ﻿using Nito.AsyncEx;
 using BlazingChatter.Enums;
 using BlazingChatter.Records;
-using System;
 using System.Threading;
 using System.Threading.Tasks;
+using BlazingChatter.Shared;
 
 namespace BlazingChatter.Services
 {
@@ -14,10 +14,12 @@ namespace BlazingChatter.Services
         BotCommand _activeCommand = BotCommand.None;
         string _lang = "en";
 
-        bool ICommandSignalService.IsRecognizedCommand(string message)
+        bool ICommandSignalService.IsRecognizedCommand(
+            string user, string message, out ActorCommand? actorCommand)
         {
             if (string.IsNullOrWhiteSpace(message))
             {
+                actorCommand = null;
                 return false;
             }
 
@@ -25,21 +27,31 @@ namespace BlazingChatter.Services
             var commandAndLang = message.Split(":");
             var command = commandAndLang[0];
 
-            _activeJokeType = commandAndLang.Length > 1 ? (JokeType)Enum.Parse(typeof(JokeType), commandAndLang[1], true) : JokeType.Dad;
+            static JokeType ParseJokeType(string value) => value switch
+            { 
+                "dad" or "d" => JokeType.Dad,
+                "chucknorris" or "cn" => JokeType.ChuckNorris,
+
+                _ => JokeType.Dad
+            };
+            _activeJokeType = commandAndLang.Length > 1 ? ParseJokeType(commandAndLang[1]) : JokeType.Dad;
             _lang = commandAndLang.Length > 2 ? commandAndLang[2] : "en";
             _activeCommand = command switch
             {
                 "joke" => BotCommand.TellJoke,
                 "jokes" => BotCommand.SayJokes,
                 "stop" => BotCommand.None,
-                var _ when (isRecognized = false) == false => _activeCommand,
-                _ => _activeCommand
+                var _ when (isRecognized = false) == false => BotCommand.None,
+                _ => BotCommand.None
             };
 
             if (_activeCommand != BotCommand.None)
             {
                 _signal.Set();
             }
+
+            actorCommand = new ActorCommand(
+                user, message, Command: (_activeJokeType, _activeCommand, _lang));
 
             return isRecognized;
         }
